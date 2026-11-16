@@ -279,15 +279,22 @@ class Engine:
 
     # ---------- 窗口过程 ----------
     def _wnd_proc(self, hwnd, msg, wparam, lparam):
-        if msg == WM_INPUT:
-            try:
+        try:
+            if msg == WM_INPUT:
                 self._handle_raw(lparam)
-            except Exception as e:
-                self.on_log("Raw Input 处理异常: %s" % e)
-            return 0
-        if msg == WM_TIMER:
-            self._pump_actions()
-            return 0
+                return 0
+            if msg == WM_TIMER:
+                self._pump_actions()
+                return 0
+        except Exception as e:
+            # 回调里任何异常都必须就地吞掉——Python 异常穿出 ctypes 回调
+            # 在某些路径下会直接令进程访问冲突崩溃（0xc0000005）
+            try:
+                self.on_log("窗口回调异常: %s" % e)
+            except Exception:
+                pass
+            if msg == WM_INPUT:
+                return 0
         return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
     def _pump_actions(self):
@@ -306,7 +313,11 @@ class Engine:
     def _dev_name(self, hdev):
         if hdev not in self._devname_cache:
             size = UINT(0)
+            if not hdev:
+                return ""
             user32.GetRawInputDeviceInfoA(hdev, RIDI_DEVICENAME, None, ctypes.byref(size))
+            if size.value == 0 or size.value > 4096:
+                return ""
             buf = (ctypes.c_char * size.value)()
             user32.GetRawInputDeviceInfoA(hdev, RIDI_DEVICENAME, buf, ctypes.byref(size))
             self._devname_cache[hdev] = buf.value.decode("utf-8", "replace")
@@ -370,16 +381,20 @@ class Engine:
 
     # ---------- 键盘钩子（仅用于屏蔽原键） ----------
     def _hook_proc(self, ncode, wparam, lparam):
-        if ncode == HC_ACTION and wparam in (WM_KEYDOWN, WM_SYSKEYDOWN):
-            info = ctypes.cast(lparam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
-            if not (info.flags & LLKHF_INJECTED):  # 不屏蔽自己 SendInput 出去的键
-                with self._lock:
-                    maps = [m for m in self.mappings
-                            if m.get("enabled", True) and m.get("block")
-                            and m.get("sig_kind") == "kbd"
-                            and m.get("sig") == info.vkCode]
-                if maps and self._came_from_target(info.time, info.vkCode):
-                    return 1
+        try:
+            if ncode == HC_ACTION and wparam in (WM_KEYDOWN, WM_SYSKEYDOWN):
+                info = ctypes.cast(lparam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+                if not (info.flags & LLKHF_INJECTED):  # 不屏蔽自己 SendInput 出去的键
+                    with self._lock:
+                        maps = [m for m in self.mappings
+                                if m.get("enabled", True) and m.get("block")
+                                and m.get("sig_kind") == "kbd"
+                                and m.get("sig") == info.vkCode]
+                    if maps and self._came_from_target(info.time, info.vkCode):
+                        return 1
+        except Exception:
+            # 钩子回调挂全局键盘链，任何异常都不能让它崩掉或断链
+            pass
         return user32.CallNextHookEx(None, ncode, wparam, lparam)
 
     def _came_from_target(self, hook_time, vk):

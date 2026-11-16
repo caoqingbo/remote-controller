@@ -19,6 +19,9 @@ __pycache__/
 *.pyc
 *.pyo
 
+# ===== 运行时 =====
+quit.flag
+
 # ===== 系统 =====
 Thumbs.db
 Desktop.ini

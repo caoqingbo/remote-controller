@@ -33,9 +33,15 @@ def save_config(cfg):
 
 def set_autostart(enabled):
     import winreg
-    pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-    target = '"%s" "%s"' % (pythonw if os.path.exists(pythonw) else sys.executable,
-                            os.path.join(BASE_DIR, "app.py"))
+    supervisor = os.path.join(BASE_DIR, "tools", "supervisor.ps1")
+    if os.path.exists(supervisor):
+        # 走守护进程：开机启动后崩溃也能自动拉起
+        target = ('powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden '
+                  '-File "%s"' % supervisor)
+    else:
+        pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+        target = '"%s" "%s"' % (pythonw if os.path.exists(pythonw) else sys.executable,
+                                os.path.join(BASE_DIR, "app.py"))
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
         if enabled:
             winreg.SetValueEx(k, APP_NAME, 0, winreg.REG_SZ, target)
@@ -102,6 +108,9 @@ class App(tk.Tk):
         self.engine.set_mappings(self.mappings)
         self.engine.start()
         self.engine_btn.config(text="停止映射引擎")
+        # 引擎看门狗：引擎线程异常退出时自动拉起（防止后台崩溃导致映射全失效）
+        self._engine_wanted = True
+        self.after(3000, self._watch_engine)
 
     # ---------------- UI ----------------
     def _build_ui(self):
@@ -187,12 +196,28 @@ class App(tk.Tk):
 
     def _toggle_engine(self):
         if self.engine.is_running():
+            self._engine_wanted = False
             self.engine.stop()
             self.engine_btn.config(text="启动映射引擎")
         else:
+            self._engine_wanted = True
             self.engine.set_mappings(self.mappings)
             self.engine.start()
             self.engine_btn.config(text="停止映射引擎")
+
+    def _watch_engine(self):
+        # 看门狗：期望运行但线程已死 → 自动重启引擎并记录日志
+        if self._engine_wanted and not self.engine.is_running():
+            self._log("⚠ 引擎线程意外退出，正在自动重启…")
+            try:
+                self.engine.set_mappings(self.mappings)
+                self.engine.start()
+                self._log("✅ 引擎已自动恢复")
+                self.engine_btn.config(text="停止映射引擎")
+            except Exception as e:
+                self._log("引擎自动重启失败: %s" % e)
+        if self.winfo_exists():
+            self.after(3000, self._watch_engine)
 
     def _refresh_device_status(self):
         match = self.cfg.get("device_match", "")
@@ -399,6 +424,12 @@ class App(tk.Tk):
 
     def _on_close(self):
         self.engine.stop()
+        # 通知守护进程这是正常关闭，不要自动重启
+        try:
+            with open(os.path.join(BASE_DIR, "quit.flag"), "w") as f:
+                f.write("quit")
+        except Exception:
+            pass
         self.destroy()
 
 
