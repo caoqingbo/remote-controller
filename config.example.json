@@ -1,0 +1,22 @@
+{
+  "device_match": "",
+  "mappings": [
+    {
+      "sig_kind": "hid",
+      "sig": "02 21 02",
+      "name": "示例：语音键 → Alt+K",
+      "action": { "type": "combo", "value": "alt+k" },
+      "block": true,
+      "enabled": false
+    },
+    {
+      "sig_kind": "kbd",
+      "sig": 38,
+      "name": "示例：上方向键 → 滚轮上",
+      "action": { "type": "mouse", "value": "scroll_up" },
+      "block": true,
+      "enabled": false
+    }
+  ],
+  "autostart": false
+}
