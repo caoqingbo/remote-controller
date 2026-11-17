@@ -237,25 +237,19 @@ class Engine:
             self.on_log("创建消息窗口失败")
             return
         regs = [
-            (0x01, 0x06, RIDEV_INPUTSINK),                  # 键盘
-            (0x01, 0x02, RIDEV_INPUTSINK),                  # 鼠标
-            (0x0C, 0x01, RIDEV_INPUTSINK | RIDEV_NOLEGACY), # 消费控制（音量/媒体/搜索等）
+            (0x01, 0x06, RIDEV_INPUTSINK),  # 键盘
+            (0x01, 0x02, RIDEV_INPUTSINK),  # 鼠标
+            (0x0C, 0x01, RIDEV_INPUTSINK),  # 消费控制（音量/媒体/搜索等）
         ]
+        # 注意：绝不使用 RIDEV_NOLEGACY。该标志在进程异常退出后会残留在
+        # 设备驱动栈中，导致 HID 键盘集体失效且只有重启才能恢复。
+        # 屏蔽原键由低级键盘钩子负责，消费控制默认行为由注册表 AppKey 负责。
         for page, usage, flags in regs:
             one = (RAWINPUTDEVICE * 1)(RAWINPUTDEVICE(page, usage, flags, self._hwnd))
             if not user32.RegisterRawInputDevices(one, 1, ctypes.sizeof(RAWINPUTDEVICE)):
                 err = kernel32.GetLastError()
-                if flags & RIDEV_NOLEGACY:
-                    # NOLEGACY 仅键鼠合法，其他通道回退为普通注册
-                    one = (RAWINPUTDEVICE * 1)(
-                        RAWINPUTDEVICE(page, usage, RIDEV_INPUTSINK, self._hwnd))
-                    if user32.RegisterRawInputDevices(one, 1, ctypes.sizeof(RAWINPUTDEVICE)):
-                        self.on_log("通道 0x%02X 已注册（NOLEGACY 不支持此通道，已回退）" % page)
-                        continue
                 self.on_log("注册 Raw Input 失败 page=0x%02X err=%s" % (page, err))
                 return
-            elif flags & RIDEV_NOLEGACY:
-                self.on_log("通道 0x%02X 已注册（含 NOLEGACY 屏蔽）" % page)
 
         self._hookproc_ref = HOOKPROC(self._hook_proc)
         self._hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, self._hookproc_ref, None, 0)
