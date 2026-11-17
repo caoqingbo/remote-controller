@@ -21,6 +21,7 @@ __pycache__/
 
 # ===== 运行时 =====
 quit.flag
+tools/supervisor.log
 
 # ===== 系统 =====
 Thumbs.db
