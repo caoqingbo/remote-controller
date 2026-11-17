@@ -216,8 +216,33 @@ class App(tk.Tk):
                 self.engine_btn.config(text="停止映射引擎")
             except Exception as e:
                 self._log("引擎自动重启失败: %s" % e)
+        self._check_keyboard_heal()
         if self.winfo_exists():
             self.after(3000, self._watch_engine)
+
+    def _check_keyboard_heal(self):
+        """检测遥控器键盘集合掉线时，调用预注册的计划任务自动愈合设备"""
+        import time as _time
+        match = self.cfg.get("device_match", "")
+        if not match:
+            return
+        now = _time.time()
+        if now - getattr(self, "_last_heal", 0) < 180:  # 3 分钟冷却
+            return
+        try:
+            devs = rawengine.enumerate_devices()
+            remote = [d for d in devs if match.lower() in d[2].lower()]
+            if not remote:
+                return  # 遥控器没连接，不处理
+            if any(t == 1 for _, t, _ in remote):
+                return  # 键盘集合在线，健康
+            self._last_heal = now
+            self._log("⚠ 检测到键盘集合掉线，尝试自动愈合…（需先运行 注册自动愈合.bat）")
+            import subprocess
+            subprocess.Popen(["schtasks", "/run", "/tn", "T6KeyboardHeal"],
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except Exception as e:
+            self._log("自动愈合检查异常: %s" % e)
 
     def _refresh_device_status(self):
         match = self.cfg.get("device_match", "")
