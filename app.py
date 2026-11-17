@@ -455,6 +455,12 @@ def _ensure_single_instance():
         return True
 
     user32.EnumWindows(WNDENUMPROC(cb), 0)
+    # 已有实例在跑：写 quit.flag 让守护进程也退出（否则会每 3 秒重启我一次）
+    try:
+        with open(os.path.join(BASE_DIR, "quit.flag"), "w") as f:
+            f.write("duplicate")
+    except Exception:
+        pass
     sys.exit(0)
 
 

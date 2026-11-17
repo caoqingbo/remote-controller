@@ -1,14 +1,12 @@
 @echo off
 chcp 65001 >nul
+set LOG=%~dp0tools\run.log
+echo ===== %DATE% %TIME% run.bat clicked ===== >> "%LOG%"
 cd /d "%~dp0"
+echo cwd=%CD% >> "%LOG%"
 where pythonw >nul 2>nul
-if %errorlevel%==0 (goto RUN)
+echo where pythonw exit=%errorlevel% >> "%LOG%"
 where py >nul 2>nul
-if %errorlevel%==0 (goto RUN)
-echo 未找到 Python。请先安装 Python 3.10+（安装时勾选 tcl/tk）
-pause
-exit /b
-
-:RUN
-rem 守护模式：软件崩溃会自动重启；正常关闭窗口则完全退出
-powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0tools\supervisor.ps1"
+echo where py exit=%errorlevel% >> "%LOG%"
+powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0tools\supervisor.ps1" >> "%LOG%" 2>&1
+echo powershell exit=%errorlevel% >> "%LOG%"
