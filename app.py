@@ -433,7 +433,33 @@ class App(tk.Tk):
         self.destroy()
 
 
+def _ensure_single_instance():
+    """单实例锁：已有实例运行时，激活它的窗口并退出当前进程"""
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateMutexW(None, False, "RemoteKeyMapper_SingleInstance")
+    if kernel32.GetLastError() != 183:  # ERROR_ALREADY_EXISTS
+        return  # 我是第一个实例，继续启动
+    user32 = ctypes.windll.user32
+    WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def cb(hwnd, lparam):
+        n = user32.GetWindowTextLengthW(hwnd)
+        if n > 0:
+            buf = ctypes.create_unicode_buffer(n + 1)
+            user32.GetWindowTextW(hwnd, buf, n + 1)
+            if "remote keymapper" in buf.value.lower():
+                user32.ShowWindow(hwnd, 9)          # SW_RESTORE
+                user32.SetForegroundWindow(hwnd)    # 拉到前台
+        return True
+
+    user32.EnumWindows(WNDENUMPROC(cb), 0)
+    sys.exit(0)
+
+
 if __name__ == "__main__":
+    _ensure_single_instance()
     app = App()
     app._reload_tree()
     app.mainloop()
