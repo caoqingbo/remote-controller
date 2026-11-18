@@ -1,20 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-T6 键位映射引擎
-- 用 Raw Input (RIDEV_INPUTSINK) 接收全局输入，并按设备来源区分遥控器 / 本机键盘
-- 用低级键盘钩子 (WH_KEYBOARD_LL) 在需要时屏蔽遥控器按键的原始行为
-- 捕获到的遥控器按键通过回调抛给 GUI；映射动作在引擎线程内执行
+Remote KeyMapper Lite 输入引擎。
+
+只通过 Raw Input 的 RIDEV_INPUTSINK 被动监听输入，不注册 NOLEGACY，
+不安装键盘钩子，也不调用任何驱动。所有原生按键都会继续交给 Windows。
 """
 import ctypes
 import queue
 import threading
-import time
-from collections import deque
 from ctypes import wintypes
-from ctypes.wintypes import (DWORD, HANDLE, HWND, INT, LONG,
-                             UINT, ULONG, USHORT, WORD)
+from ctypes.wintypes import DWORD, HANDLE, HWND, INT, LONG, UINT, ULONG, USHORT
 
-# 注意：ctypes.wintypes 里的 WPARAM/LPARAM 是 32 位，64 位下必须自己定义
 WPARAM = ctypes.c_size_t
 LPARAM = ctypes.c_ssize_t
 LRESULT = ctypes.c_ssize_t
@@ -24,37 +20,21 @@ from vkdefs import vk_display
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
-
 ULONG_PTR = ctypes.c_size_t
 
 RIM_TYPEMOUSE, RIM_TYPEKEYBOARD, RIM_TYPEHID = 0, 1, 2
 RID_INPUT = 0x10000003
 RIDI_DEVICENAME = 0x20000007
 RIDEV_INPUTSINK = 0x00000100
-RIDEV_NOLEGACY = 0x00000030  # 禁止该通道生成系统默认行为（如 AC Search 打开搜索）
-
 WM_INPUT = 0x00FF
 WM_TIMER = 0x0113
 WM_QUIT = 0x0012
-WM_DESTROY = 0x0002
-
 RI_KEY_MAKE = 0
-RI_KEY_BREAK = 1
-
 RI_MOUSE_LEFT_BUTTON_DOWN = 0x0001
 RI_MOUSE_RIGHT_BUTTON_DOWN = 0x0004
 RI_MOUSE_MIDDLE_BUTTON_DOWN = 0x0010
 
-WH_KEYBOARD_LL = 13
-HC_ACTION = 0
-WM_KEYDOWN = 0x0100
-WM_SYSKEYDOWN = 0x0104
-LLKHF_INJECTED = 0x10
 
-CORRELATE_MS = 200  # 钩子事件与 Raw Input 事件的关联时间窗
-
-
-# ---------- 结构体 ----------
 class RAWINPUTDEVICELIST(ctypes.Structure):
     _fields_ = [("hDevice", HANDLE), ("dwType", DWORD)]
 
@@ -93,11 +73,6 @@ class RAWINPUTDEVICE(ctypes.Structure):
                 ("dwFlags", DWORD), ("hwndTarget", HWND)]
 
 
-class KBDLLHOOKSTRUCT(ctypes.Structure):
-    _fields_ = [("vkCode", DWORD), ("scanCode", DWORD), ("flags", DWORD),
-                ("time", DWORD), ("dwExtraInfo", ULONG_PTR)]
-
-
 class POINT(ctypes.Structure):
     _fields_ = [("x", LONG), ("y", LONG)]
 
@@ -108,18 +83,11 @@ class MSG(ctypes.Structure):
 
 
 WNDPROC = ctypes.WINFUNCTYPE(LRESULT, HWND, UINT, WPARAM, LPARAM)
-HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, INT, WPARAM, LPARAM)
 
 
 def _set_prototypes():
-    """显式声明 64 位参数/返回值，避免 ctypes 默认 int 截断"""
     user32.DefWindowProcW.argtypes = [HWND, UINT, WPARAM, LPARAM]
     user32.DefWindowProcW.restype = LRESULT
-    user32.CallNextHookEx.argtypes = [HANDLE, INT, WPARAM, LPARAM]
-    user32.CallNextHookEx.restype = LRESULT
-    user32.SetWindowsHookExW.argtypes = [INT, HOOKPROC, HANDLE, DWORD]
-    user32.SetWindowsHookExW.restype = HANDLE
-    user32.UnhookWindowsHookEx.argtypes = [HANDLE]
     user32.CreateWindowExW.argtypes = [DWORD, ctypes.c_wchar_p, ctypes.c_wchar_p,
                                        DWORD, INT, INT, INT, INT,
                                        HANDLE, HANDLE, HANDLE, ctypes.c_void_p]
@@ -140,12 +108,8 @@ class WNDCLASSEXW(ctypes.Structure):
                 ("lpszClassName", ctypes.c_wchar_p), ("hIconSm", HANDLE)]
 
 
-def tick_ms():
-    return kernel32.GetTickCount64() & 0xFFFFFFFF
-
-
 def enumerate_devices():
-    """返回 [(hDevice, dwType, name)]"""
+    """返回 [(hDevice, dwType, name)]，仅枚举，不修改设备状态。"""
     n = UINT(0)
     user32.GetRawInputDeviceList(None, ctypes.byref(n), ctypes.sizeof(RAWINPUTDEVICELIST))
     arr = (RAWINPUTDEVICELIST * n.value)()
@@ -161,7 +125,6 @@ def enumerate_devices():
 
 
 def find_device_handle(match: str):
-    """按设备路径子串（如蓝牙 MAC）找设备句柄，找不到返回 None"""
     for h, t, name in enumerate_devices():
         if match.lower() in name.lower():
             return h
@@ -173,25 +136,21 @@ class Engine:
         self.device_match = device_match
         self.on_capture = on_capture or (lambda e: None)
         self.on_log = on_log or (lambda m: None)
-        self.mappings = []          # list[dict]: {sig_kind, sig, name, action, block, enabled}
+        self.mappings = []
         self._lock = threading.Lock()
         self._thread = None
         self._thread_id = None
         self._hwnd = None
-        self._hook = None
         self._running = threading.Event()
-        self._raw_events = deque(maxlen=64)   # (tick, hDevice, kind, vk_or_None)
         self._action_q = queue.Queue()
         self._devname_cache = {}
         self._wndproc_ref = None
-        self._hookproc_ref = None
 
-    # ---------- 生命周期 ----------
     def start(self):
         if self._thread and self._thread.is_alive():
             return
         self._running.set()
-        self._thread = threading.Thread(target=self._run, daemon=True, name="T6Engine")
+        self._thread = threading.Thread(target=self._run, daemon=True, name="T6LiteEngine")
         self._thread.start()
 
     def stop(self):
@@ -210,14 +169,14 @@ class Engine:
 
     def set_device_match(self, match):
         self.device_match = match
+        self._devname_cache.clear()
 
     def device_present(self):
         return find_device_handle(self.device_match) is not None
 
-    # ---------- 引擎线程 ----------
     def _run(self):
         self._thread_id = kernel32.GetCurrentThreadId()
-        class_name = "T6KeyMapperEngineWnd"
+        class_name = "RemoteKeyMapperLiteEngineWnd"
         self._wndproc_ref = WNDPROC(self._wnd_proc)
         wndclass = WNDCLASSEXW()
         wndclass.cbSize = ctypes.sizeof(WNDCLASSEXW)
@@ -226,38 +185,30 @@ class Engine:
         wndclass.lpszClassName = class_name
         if not user32.RegisterClassExW(ctypes.byref(wndclass)):
             err = kernel32.GetLastError()
-            if err != 1410:  # 类已注册
+            if err != 1410:
                 self.on_log("注册窗口类失败: %s" % err)
                 return
-        HWND_MESSAGE = ctypes.c_void_p(-3)
-        self._hwnd = user32.CreateWindowExW(0, class_name, "T6Engine", 0,
-                                            0, 0, 0, 0, HWND_MESSAGE, None,
+        hwnd_message = ctypes.c_void_p(-3)
+        self._hwnd = user32.CreateWindowExW(0, class_name, "T6LiteEngine", 0,
+                                            0, 0, 0, 0, hwnd_message, None,
                                             wndclass.hInstance, None)
         if not self._hwnd:
             self.on_log("创建消息窗口失败")
             return
         regs = [
-            (0x01, 0x06, RIDEV_INPUTSINK),  # 键盘
-            (0x01, 0x02, RIDEV_INPUTSINK),  # 鼠标
-            (0x0C, 0x01, RIDEV_INPUTSINK),  # 消费控制（音量/媒体/搜索等）
+            (0x01, 0x06),  # 键盘
+            (0x01, 0x02),  # 鼠标
+            (0x0C, 0x01),  # 消费控制
         ]
-        # 注意：绝不使用 RIDEV_NOLEGACY。该标志在进程异常退出后会残留在
-        # 设备驱动栈中，导致 HID 键盘集体失效且只有重启才能恢复。
-        # 屏蔽原键由低级键盘钩子负责，消费控制默认行为由注册表 AppKey 负责。
-        for page, usage, flags in regs:
-            one = (RAWINPUTDEVICE * 1)(RAWINPUTDEVICE(page, usage, flags, self._hwnd))
+        for page, usage in regs:
+            one = (RAWINPUTDEVICE * 1)(
+                RAWINPUTDEVICE(page, usage, RIDEV_INPUTSINK, self._hwnd))
             if not user32.RegisterRawInputDevices(one, 1, ctypes.sizeof(RAWINPUTDEVICE)):
-                err = kernel32.GetLastError()
-                self.on_log("注册 Raw Input 失败 page=0x%02X err=%s" % (page, err))
+                self.on_log("注册 Raw Input 失败 page=0x%02X err=%s" %
+                            (page, kernel32.GetLastError()))
                 return
-
-        self._hookproc_ref = HOOKPROC(self._hook_proc)
-        self._hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, self._hookproc_ref, None, 0)
-        if not self._hook:
-            self.on_log("安装键盘钩子失败（屏蔽原键功能不可用）")
-
-        user32.SetTimer(self._hwnd, 1, 25, None)  # 动作队列泵
-        self.on_log("引擎已启动")
+        user32.SetTimer(self._hwnd, 1, 25, None)
+        self.on_log("轻量引擎已启动（无驱动、不屏蔽原键）")
         msg = MSG()
         while self._running.is_set():
             ret = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
@@ -265,13 +216,9 @@ class Engine:
                 break
             user32.TranslateMessage(ctypes.byref(msg))
             user32.DispatchMessageW(ctypes.byref(msg))
-        if self._hook:
-            user32.UnhookWindowsHookEx(self._hook)
-            self._hook = None
         user32.DestroyWindow(self._hwnd)
-        self.on_log("引擎已停止")
+        self.on_log("轻量引擎已停止")
 
-    # ---------- 窗口过程 ----------
     def _wnd_proc(self, hwnd, msg, wparam, lparam):
         try:
             if msg == WM_INPUT:
@@ -281,8 +228,6 @@ class Engine:
                 self._pump_actions()
                 return 0
         except Exception as e:
-            # 回调里任何异常都必须就地吞掉——Python 异常穿出 ctypes 回调
-            # 在某些路径下会直接令进程访问冲突崩溃（0xc0000005）
             try:
                 self.on_log("窗口回调异常: %s" % e)
             except Exception:
@@ -303,7 +248,6 @@ class Engine:
             except Exception as e:
                 self.on_log("动作执行失败 (%s): %s" % (label, e))
 
-    # ---------- Raw Input ----------
     def _dev_name(self, hdev):
         if hdev not in self._devname_cache:
             size = UINT(0)
@@ -318,7 +262,7 @@ class Engine:
         return self._devname_cache[hdev]
 
     def _is_target(self, hdev):
-        return self.device_match.lower() in self._dev_name(hdev).lower()
+        return bool(self.device_match) and self.device_match.lower() in self._dev_name(hdev).lower()
 
     def _handle_raw(self, lparam):
         hraw = HANDLE(lparam)
@@ -332,31 +276,25 @@ class Engine:
             return
         raw = ctypes.cast(buf, ctypes.POINTER(RAWINPUT)).contents
         hdev = raw.header.hDevice
-        is_t6 = self._is_target(hdev)
-        now = tick_ms()
-
+        if not self._is_target(hdev):
+            return
         if raw.header.dwType == RIM_TYPEKEYBOARD:
             kb = raw.data.keyboard
             down = (kb.Flags & 0x01) == RI_KEY_MAKE
             vk = kb.VKey
-            self._raw_events.append((now, hdev, "kbd", vk))
-            if is_t6 and down:
+            if down:
                 self._dispatch(("kbd", vk), vk_display(vk))
-            if is_t6:
-                self.on_capture({"kind": "kbd", "vk": vk, "name": vk_display(vk),
-                                 "down": down, "sig": ["kbd", vk]})
+            self.on_capture({"kind": "kbd", "vk": vk, "name": vk_display(vk),
+                             "down": down, "sig": ["kbd", vk]})
         elif raw.header.dwType == RIM_TYPEHID:
             hid = raw.data.hid
             off = hdr_size + 8
             n = hid.dwSizeHid * hid.dwCount
             if n > 0:
-                data = bytes(bytearray(buf[off:off + n]))
-                hexstr = data.hex(" ")
-                self._raw_events.append((now, hdev, "hid", None))
-                if is_t6:
-                    self._dispatch(("hid", hexstr), "HID " + hexstr)
-                    self.on_capture({"kind": "hid", "bytes": hexstr,
-                                     "down": True, "sig": ["hid", hexstr]})
+                hexstr = bytes(bytearray(buf[off:off + n])).hex(" ")
+                self._dispatch(("hid", hexstr), "HID " + hexstr)
+                self.on_capture({"kind": "hid", "bytes": hexstr,
+                                 "down": True, "sig": ["hid", hexstr]})
         elif raw.header.dwType == RIM_TYPEMOUSE:
             ms = raw.data.mouse
             btn = None
@@ -367,40 +305,10 @@ class Engine:
             elif ms.usButtonFlags & RI_MOUSE_MIDDLE_BUTTON_DOWN:
                 btn = "middle"
             if btn:
-                self._raw_events.append((now, hdev, "mouse", None))
-                if is_t6:
-                    self._dispatch(("mouse", btn), "鼠标" + btn)
-                    self.on_capture({"kind": "mouse", "button": btn,
-                                     "down": True, "sig": ["mouse", btn]})
+                self._dispatch(("mouse", btn), "鼠标" + btn)
+                self.on_capture({"kind": "mouse", "button": btn,
+                                 "down": True, "sig": ["mouse", btn]})
 
-    # ---------- 键盘钩子（仅用于屏蔽原键） ----------
-    def _hook_proc(self, ncode, wparam, lparam):
-        try:
-            if ncode == HC_ACTION and wparam in (WM_KEYDOWN, WM_SYSKEYDOWN):
-                info = ctypes.cast(lparam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
-                if not (info.flags & LLKHF_INJECTED):  # 不屏蔽自己 SendInput 出去的键
-                    with self._lock:
-                        maps = [m for m in self.mappings
-                                if m.get("enabled", True) and m.get("block")
-                                and m.get("sig_kind") == "kbd"
-                                and m.get("sig") == info.vkCode]
-                    if maps and self._came_from_target(info.time, info.vkCode):
-                        return 1
-        except Exception:
-            # 钩子回调挂全局键盘链，任何异常都不能让它崩掉或断链
-            pass
-        return user32.CallNextHookEx(None, ncode, wparam, lparam)
-
-    def _came_from_target(self, hook_time, vk):
-        now = tick_ms()
-        for (t, hdev, kind, ev_vk) in reversed(self._raw_events):
-            if abs(((now - t) & 0xFFFFFFFF)) > CORRELATE_MS:
-                break
-            if self._is_target(hdev) and (ev_vk == vk or kind == "hid"):
-                return True
-        return False
-
-    # ---------- 映射派发 ----------
     def _dispatch(self, sig, label):
         with self._lock:
             maps = [m for m in self.mappings
@@ -408,7 +316,3 @@ class Engine:
                     and m.get("sig_kind") == sig[0] and m.get("sig") == sig[1]]
         for m in maps:
             self._action_q.put((m["action"], m.get("name") or label))
-            if m.get("block") and sig[0] == "hid":
-                # HID 消费控制键的系统默认行为（如打开搜索）：动作执行的同时监视并关闭
-                threading.Thread(target=actions.suppress_search_window,
-                                 daemon=True).start()

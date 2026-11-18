@@ -88,7 +88,7 @@ ACTION_HINTS = {
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Remote KeyMapper — HID 遥控器键位映射（支持 T6 等任意 HID 遥控器）")
+        self.title("Remote KeyMapper Lite — 无驱动遥控器键位映射")
         self.geometry("780x600")
         self.cfg = load_config()
         self.ui_q = queue.Queue()
@@ -156,8 +156,7 @@ class App(tk.Tk):
         self.act_entry.pack(side="left", padx=4)
         self.record_btn = ttk.Button(row2, text="⌨ 按键录入", command=self._arm_record)
         self.record_btn.pack(side="left", padx=2)
-        self.block_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(row2, text="屏蔽遥控器原键功能", variable=self.block_var).pack(side="left", padx=8)
+        ttk.Label(row2, text="轻量版：保留原键功能", foreground="#287a45").pack(side="left", padx=8)
         ttk.Button(row2, text="保存映射", command=self._save_mapping).pack(side="right")
         # 动作类型完整选项说明（随选择联动）
         self.act_hint = tk.StringVar()
@@ -169,10 +168,10 @@ class App(tk.Tk):
         # --- 映射列表 ---
         lst = ttk.LabelFrame(mid, text="③ 已保存的映射", padding=8)
         lst.pack(fill="both", expand=True, pady=(0, 8))
-        cols = ("name", "sig", "action", "block", "enabled")
+        cols = ("name", "sig", "action", "enabled")
         self.tree = ttk.Treeview(lst, columns=cols, show="headings", height=8)
-        for c, t, w in [("name", "名称", 120), ("sig", "遥控器按键", 200),
-                        ("action", "动作", 220), ("block", "屏蔽原键", 70), ("enabled", "启用", 60)]:
+        for c, t, w in [("name", "名称", 130), ("sig", "遥控器按键", 210),
+                        ("action", "动作", 260), ("enabled", "启用", 70)]:
             self.tree.heading(c, text=t)
             self.tree.column(c, width=w, anchor="w")
         self.tree.pack(side="left", fill="both", expand=True)
@@ -216,33 +215,8 @@ class App(tk.Tk):
                 self.engine_btn.config(text="停止映射引擎")
             except Exception as e:
                 self._log("引擎自动重启失败: %s" % e)
-        self._check_keyboard_heal()
         if self.winfo_exists():
             self.after(3000, self._watch_engine)
-
-    def _check_keyboard_heal(self):
-        """检测遥控器键盘集合掉线时，调用预注册的计划任务自动愈合设备"""
-        import time as _time
-        match = self.cfg.get("device_match", "")
-        if not match:
-            return
-        now = _time.time()
-        if now - getattr(self, "_last_heal", 0) < 180:  # 3 分钟冷却
-            return
-        try:
-            devs = rawengine.enumerate_devices()
-            remote = [d for d in devs if match.lower() in d[2].lower()]
-            if not remote:
-                return  # 遥控器没连接，不处理
-            if any(t == 1 for _, t, _ in remote):
-                return  # 键盘集合在线，健康
-            self._last_heal = now
-            self._log("⚠ 检测到键盘集合掉线，尝试自动愈合…（需先运行 注册自动愈合.bat）")
-            import subprocess
-            subprocess.Popen(["schtasks", "/run", "/tn", "T6KeyboardHeal"],
-                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        except Exception as e:
-            self._log("自动愈合检查异常: %s" % e)
 
     def _refresh_device_status(self):
         match = self.cfg.get("device_match", "")
@@ -391,7 +365,7 @@ class App(tk.Tk):
                 return
         m = {"sig_kind": sig[0], "sig": sig[1], "name": self.name_var.get().strip() or "未命名",
              "action": {"type": t, "value": v},
-             "block": self.block_var.get() and sig[0] in ("kbd", "hid"), "enabled": True}
+             "block": False, "enabled": True}
         self.mappings = [x for x in self.mappings
                          if not (x["sig_kind"] == m["sig_kind"] and x["sig"] == m["sig"])]
         self.mappings.append(m)
@@ -421,7 +395,6 @@ class App(tk.Tk):
             self.tree.insert("", "end", iid=str(i), values=(
                 m.get("name", ""), sig_text(m["sig_kind"], m["sig"]),
                 "%s: %s" % (m["action"]["type"], m["action"]["value"]),
-                "是" if m.get("block") else "否",
                 "✓" if m.get("enabled", True) else "✗"))
 
     # ---------------- 队列与日志 ----------------

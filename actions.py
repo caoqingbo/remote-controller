@@ -74,20 +74,8 @@ KEYEVENTF_EXTENDEDKEY = 0x0001
 _EXTENDED_VKS = {0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
                  0x2D, 0x2E, 0x5B, 0x5C, 0xA3, 0xA5, 0x6F, 0x90, 0xA6, 0xA7}
 
-# 优先使用 Interception 驱动级发送（对过滤注入按键的程序有效），未就绪时回退 SendInput
-try:
-    import icsend
-    _IC_AVAILABLE = icsend.available()
-except Exception:
-    _IC_AVAILABLE = False
-
-
 def send_combo(vks):
-    """按下并松开一组键（如 [ctrl, c]），正确处理扩展键（如右Alt）。
-    Interception 驱动就绪时走驱动级通道，否则走 SendInput。"""
-    if _IC_AVAILABLE:
-        icsend.send_combo(vks)
-        return
+    """通过 Windows SendInput 发送组合键，不依赖任何第三方驱动。"""
     seq = []
     for v in vks:
         flags = KEYEVENTF_EXTENDEDKEY if v in _EXTENDED_VKS else 0
